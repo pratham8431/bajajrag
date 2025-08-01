@@ -3,10 +3,13 @@ uvicorn
 pydantic
 python-dotenv
 aiohttp
-openai
+openai>=1.0.0
 pinecone-client
 PyMuPDF
 langchain
 sqlalchemy
 tenacity
 psycopg2-binary
+python-docx
+scikit-learn
+numpy

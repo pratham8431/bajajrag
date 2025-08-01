@@ -21,7 +21,7 @@ class Chunk(Base):
     document_id  = Column(Integer, ForeignKey("documents.id"), nullable=False)
     page         = Column(Integer)
     section      = Column(String)
-    metadata     = Column(JSON)
+    chunk_metadata = Column(JSON)  # Renamed from metadata to avoid SQLAlchemy conflict
     created_at   = Column(DateTime, default=datetime.utcnow)
     document     = relationship("Document", back_populates="chunks")
 

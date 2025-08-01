@@ -12,24 +12,44 @@ def split_into_sections(pages: List[Tuple[int, str]]) -> List[Dict]:
     full_text = []
     for pg, text in pages:
         clean = text.strip().replace("\xa0", " ")
-        if len(clean) < 200 and len(re.findall(r'\d{1,3}', clean)) > 5:
+        if len(clean) < 50:  # Skip very short pages
             continue
         full_text.append(f"\n\n<PAGE {pg}>\n{clean}")
+    
+    if not full_text:
+        # If no content found, create a single section
+        return [{"section_title": "Document", "section_text": "No readable content found in document."}]
+    
     joined = "\n".join(full_text)
-    joined = re.split(r'(?:CONTENTS|PREFACE)', joined, flags=re.IGNORECASE, maxsplit=1)[-1]
+    
+    # Try to split by article patterns first
     parts = ARTICLE_HEADING_RE.split(joined)
     sections = []
-    for i in range(1, len(parts), 2):
-        title = parts[i].strip()
-        body  = parts[i+1].strip()
-        sections.append({"section_title": title, "section_text": body})
+    
+    if len(parts) > 1:
+        # Found article patterns
+        for i in range(1, len(parts), 2):
+            if i + 1 < len(parts):
+                title = parts[i].strip()
+                body = parts[i + 1].strip()
+                if body:  # Only add if there's content
+                    sections.append({"section_title": title, "section_text": body})
+    else:
+        # No article patterns found, treat as single section
+        sections.append({"section_title": "Document", "section_text": joined})
+    
     return sections
+
+from ..utils.config import config
 
 def chunk_sections(
     sections: List[Dict],
-    chunk_size: int = 500,
-    chunk_overlap: int = 100
+    chunk_size: int = None,
+    chunk_overlap: int = None
 ) -> List[Dict]:
+    # Use config values if not provided
+    chunk_size = chunk_size or config.CHUNK_SIZE
+    chunk_overlap = chunk_overlap or config.CHUNK_OVERLAP
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,

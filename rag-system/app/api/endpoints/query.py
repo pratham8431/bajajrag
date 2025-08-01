@@ -10,25 +10,40 @@ from dotenv import load_dotenv
 
 # Load environment
 load_dotenv()
-import openai
-openai.api_key = os.getenv("OPENAI_API_KEY")
+from ...utils.config import config
+
+# Validate configuration
+config.validate()
 
 # App modules
-from app.ingestion.pipeline           import ingest_document
-from app.query.query_parser          import parse_query
-from app.embeddings.embedder         import _embed_batch
-from app.vectorstore.pinecone_client import query_pinecone
-from app.query.evaluator             import evaluate_answer
+from ...ingestion.pipeline           import ingest_document
+from ...query.query_parser          import parse_query
+from ...embeddings.embedder         import _embed_batch_sync, _embed_batch_async, client
+from ...vectorstore.pinecone_client import query_pinecone
+from ...query.evaluator             import evaluate_answer
+from ...query.retriever             import hybrid_retriever
+from ...query.formatter             import advanced_formatter
 
 # Router setup
 router = APIRouter()
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+from ...utils.logger import setup_logger
+logger = setup_logger(__name__)
 
 # Pydantic models
+from pydantic import BaseModel, validator, HttpUrl
+from typing import List, Dict, Any
+
 class RunRequest(BaseModel):
-    documents: str              # URL to the PDF
+    documents: HttpUrl          # URL to the PDF
     questions: List[str]        # List of questions
+    
+    @validator('questions')
+    def validate_questions(cls, v):
+        if not v:
+            raise ValueError('At least one question is required')
+        if len(v) > 10:
+            raise ValueError('Maximum 10 questions allowed per request')
+        return v
 
 class ClauseRef(BaseModel):
     id: str
@@ -42,7 +57,7 @@ class QAItem(BaseModel):
     sources: List[ClauseRef]
 
 class RunResponse(BaseModel):
-    results: List[QAItem]
+    results: List[Dict[str, Any]]
 
 @router.post("/run", response_model=RunResponse)
 async def run_handler(req: RunRequest):
@@ -66,36 +81,45 @@ async def run_handler(req: RunRequest):
     for question in req.questions:
         # 1) Parse the question into structured JSON
         try:
-            parsed = parse_query(question)
+            parsed = await parse_query(question)
         except Exception as e:
             logger.error(f"Query parsing failed: {e}")
             raise HTTPException(status_code=500, detail=f"Query parsing failed: {e}")
 
         # 2) Embed the question itself
         try:
-            question_embedding = (await _embed_batch([question]))[0]
+            is_azure = 'AzureOpenAI' in str(type(client))
+            if is_azure:
+                # Azure OpenAI - synchronous
+                question_embedding = (_embed_batch_sync([question]))[0]
+            else:
+                # OpenAI - asynchronous
+                question_embedding = (await _embed_batch_async([question]))[0]
         except Exception as e:
             logger.error(f"Question embedding failed: {e}")
             raise HTTPException(status_code=500, detail=f"Question embedding failed: {e}")
 
-        # 3) Retrieve top-K relevant chunks from Pinecone
+        # 3) Perform hybrid search (semantic + keyword + exact match)
         try:
-            matches = query_pinecone(question_embedding, top_k=5)
+            retrieved_chunks = await hybrid_retriever.hybrid_search(
+                query=question,
+                chunks=embedded_chunks,
+                top_k=10
+            )
+            logger.info(f"Retrieved {len(retrieved_chunks)} chunks using hybrid search for question: {question}")
         except Exception as e:
-            logger.error(f"Pinecone query failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Pinecone query failed: {e}")
-
-        logger.info(f"Retrieved {len(matches)} chunks for question: {question}")
+            logger.error(f"Hybrid search failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
         # 4) Prepare contexts for the evaluator
         contexts = []
-        for m in matches:
-            chunk = chunk_map.get(m["id"])
-            if chunk:
-                contexts.append({
-                    "chunk_text": chunk["chunk_text"],
-                    "metadata": m["metadata"]
-                })
+        for chunk in retrieved_chunks:
+            contexts.append({
+                "chunk_text": chunk.get("chunk_text", ""),
+                "metadata": chunk.get("metadata", {}),
+                "search_method": chunk.get("method", "unknown"),
+                "score": chunk.get("score", 0)
+            })
 
         # 5) Evaluate answer using the LLM
         try:
@@ -108,19 +132,17 @@ async def run_handler(req: RunRequest):
             logger.error(f"Evaluation failed: {e}")
             raise HTTPException(status_code=500, detail=f"Evaluation failed: {e}")
 
-        # 6) Build source references
-        sources = [
-            ClauseRef(id=m["id"], score=m["score"], metadata=m["metadata"])
-            for m in matches
-        ]
-
-        # 7) Append the QAItem
-        results.append(QAItem(
+        # 6) Format structured response
+        structured_response = advanced_formatter.format_structured_response(
             question=question,
             answer=eval_res["answer"],
             justification=eval_res["justification"],
-            sources=sources
-        ))
+            retrieved_chunks=retrieved_chunks,
+            parsed_query=parsed
+        )
+
+        # 7) Append the structured response
+        results.append(structured_response)
 
     # ─── Return Structured Response ────────────────────────────────────────────
     return RunResponse(results=results)

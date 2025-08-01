@@ -60,12 +60,14 @@ async def embed_chunks_openai(
 ) -> List[Dict[str, Any]]:
     """
     Batch‐embed each chunk asynchronously. Adds 'embedding' to each chunk.
+    Uses text_for_embedding (with contextual headers) if available, falls back to chunk_text.
     """
     logger.info(f"Embedding {len(chunks)} chunks (batch size={BATCH_SIZE})")
     embeddings: List[List[float]] = []
     for i in range(0, len(chunks), BATCH_SIZE):
         batch = chunks[i : i + BATCH_SIZE]
-        texts = [c["chunk_text"] for c in batch]
+        # Use text_for_embedding if available (contains contextual headers), otherwise fall back to chunk_text
+        texts = [c.get("text_for_embedding", c["chunk_text"]) for c in batch]
         try:
             # Only use async for OpenAI, not Azure
             is_azure = 'AzureOpenAI' in str(type(client))
@@ -89,13 +91,15 @@ def embed_chunks_openai_sync(
 ) -> List[Dict[str, Any]]:
     """
     Synchronous version for Azure OpenAI. Adds 'embedding' to each chunk.
+    Uses text_for_embedding (with contextual headers) if available, falls back to chunk_text.
     """
     logger.info(f"Embedding {len(chunks)} chunks (batch size={BATCH_SIZE})")
     logger.info(f"Using Azure OpenAI client: {'AzureOpenAI' in str(type(client))}")
     embeddings: List[List[float]] = []
     for i in range(0, len(chunks), BATCH_SIZE):
         batch = chunks[i : i + BATCH_SIZE]
-        texts = [c["chunk_text"] for c in batch]
+        # Use text_for_embedding if available (contains contextual headers), otherwise fall back to chunk_text
+        texts = [c.get("text_for_embedding", c["chunk_text"]) for c in batch]
         try:
             logger.info(f"Calling _embed_batch_sync for batch {i//BATCH_SIZE+1}")
             batch_emb = _embed_batch_sync(texts)

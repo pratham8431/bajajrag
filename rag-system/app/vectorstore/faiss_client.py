@@ -85,9 +85,16 @@ def upsert_to_faiss(chunks: List[Dict[str, Any]]):
                 embedding = embedding / norm
         
         vectors.append(embedding)
+        
+        # Store both chunk_text and text_for_embedding in metadata
+        chunk_metadata = chunk["metadata"].copy()
+        chunk_metadata["chunk_text"] = chunk["chunk_text"]
+        if "text_for_embedding" in chunk:
+            chunk_metadata["text_for_embedding"] = chunk["text_for_embedding"]
+        
         new_metadata.append({
             "id": chunk["id"],
-            "metadata": chunk["metadata"]
+            "metadata": chunk_metadata
         })
     
     # Convert to numpy array

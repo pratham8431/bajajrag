@@ -42,7 +42,9 @@ def _evaluate_answer_azure(
     context_strs = []
     for c in contexts:
         meta = c["metadata"]
-        context_strs.append(f"Section: {meta.get('section')}\nText: {c['chunk_text']}")
+        # Use text_for_embedding if available (contains document title header), otherwise fall back to chunk_text
+        chunk_text = c.get("text_for_embedding", c["chunk_text"])
+        context_strs.append(f"Section: {meta.get('section')}\nText: {chunk_text}")
 
     prompt = f"""
 You are a policy-underwriting assistant.  
@@ -68,6 +70,12 @@ Return JSON: {{ "answer":"...", "justification":"..." }}
     text = resp.choices[0].message.content.strip()
     logger.info(f"Azure evaluator response: {text}")
     try:
+        # Handle markdown-wrapped JSON responses
+        if text.startswith("```json"):
+            text = text[7:]  # Remove ```json
+        if text.endswith("```"):
+            text = text[:-3]  # Remove ```
+        text = text.strip()
         return json.loads(text)
     except json.JSONDecodeError as e:
         logger.error(f"JSON parsing failed: {e}, text: {text}")
@@ -106,7 +114,9 @@ async def evaluate_answer(
         context_strs = []
         for c in contexts:
             meta = c["metadata"]
-            context_strs.append(f"Section: {meta.get('section')}\nText: {c['chunk_text']}")
+            # Use text_for_embedding if available (contains document title header), otherwise fall back to chunk_text
+            chunk_text = c.get("text_for_embedding", c["chunk_text"])
+            context_strs.append(f"Section: {meta.get('section')}\nText: {chunk_text}")
 
         prompt = f"""
 You are a policy-underwriting assistant.  
@@ -133,6 +143,12 @@ Return JSON: {{ "answer":"...", "justification":"..." }}
         text = resp.choices[0].message.content.strip()
         logger.info(f"OpenAI evaluator response: {text}")
         try:
+            # Handle markdown-wrapped JSON responses
+            if text.startswith("```json"):
+                text = text[7:]  # Remove ```json
+            if text.endswith("```"):
+                text = text[:-3]  # Remove ```
+            text = text.strip()
             return json.loads(text)
         except json.JSONDecodeError as e:
             logger.error(f"JSON parsing failed: {e}, text: {text}")

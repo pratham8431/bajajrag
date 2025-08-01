@@ -98,6 +98,10 @@ class HybridRetriever:
             dense_results = query_faiss(query_embedding, top_k=top_k)
             for result in dense_results:
                 result["method"] = "semantic_search"
+                # Ensure we have the contextual headers for evaluation
+                if "text_for_embedding" in result["metadata"]:
+                    result["text_for_embedding"] = result["metadata"]["text_for_embedding"]
+                result["chunk_text"] = result["metadata"].get("chunk_text", "")
         except Exception as e:
             dense_results = []
         

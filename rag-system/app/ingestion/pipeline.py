@@ -2,6 +2,7 @@
 
 import os
 import logging
+import asyncio
 from typing import List, Dict, Any, Tuple
 
 from dotenv import load_dotenv
@@ -24,11 +25,77 @@ from ..db.models import Document, Chunk
 
 # — Initialize environment & DB —
 load_dotenv()
-init_db()  # create tables if they don’t yet exist
+init_db()  # create tables if they don't yet exist
 
 # — Logger setup —
 from ..utils.logger import setup_logger
 logger = setup_logger(__name__)
+
+async def generate_document_title(document_text: str, document_name: str) -> str:
+    """
+    Generate a succinct document title using LLM.
+    This title will be prepended to all chunks for better context.
+    """
+    try:
+        # Reload environment variables to get the latest deployment name
+        load_dotenv()
+        from ..utils.config import config
+        
+        # Get the deployment name dynamically
+        if config.AZURE_OPENAI_API_KEY and config.AZURE_OPENAI_ENDPOINT:
+            MODEL = config.AZURE_GPT35_DEPLOYMENT
+            logger.info(f"Using Azure OpenAI deployment for title generation: {MODEL}")
+            
+            # Azure OpenAI - synchronous, run in thread
+            def _generate_title_azure():
+                prompt = f"""
+                You are a document analyzer. Given the following document content, generate a concise, descriptive title (max 10 words) that captures the main topic or purpose of the document.
+                
+                Document Name: {document_name}
+                Document Content (first 2000 characters): {document_text[:2000]}
+                
+                Return only the title, nothing else. Make it specific and informative.
+                """
+                resp = client.chat.completions.create(
+                    model=MODEL,
+                    messages=[
+                        {"role": "system", "content": "You generate concise document titles."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1
+                )
+                return resp.choices[0].message.content.strip()
+            
+            title = await asyncio.to_thread(_generate_title_azure)
+        else:
+            MODEL = "gpt-3.5-turbo"
+            logger.info("Using OpenAI for title generation")
+            
+            prompt = f"""
+            You are a document analyzer. Given the following document content, generate a concise, descriptive title (max 10 words) that captures the main topic or purpose of the document.
+            
+            Document Name: {document_name}
+            Document Content (first 2000 characters): {document_text[:2000]}
+            
+            Return only the title, nothing else. Make it specific and informative.
+            """
+            resp = await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "You generate concise document titles."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1
+            )
+            title = resp.choices[0].message.content.strip()
+        
+        logger.info(f"Generated document title: '{title}'")
+        return title
+        
+    except Exception as e:
+        logger.error(f"Failed to generate document title: {e}")
+        # Fallback to document name
+        return document_name
 
 async def ingest_document(
     url: str,
@@ -38,10 +105,12 @@ async def ingest_document(
     """
     Advanced ingestion pipeline supporting multiple document types:
       1) Download document → detect type → extract text
-      2) Chunk into semantic sections
-      3) Persist Document + Chunk metadata in Postgres
-      4) Generate embeddings
-      5) Upsert embeddings to Pinecone
+      2) Generate document title using LLM
+      3) Chunk into semantic sections
+      4) Add contextual headers to chunks
+      5) Persist Document + Chunk metadata in Postgres
+      6) Generate embeddings (with headers)
+      7) Upsert embeddings to FAISS
     Returns the list of embedded chunk dicts.
     """
     logger.info(f"▶️ Starting advanced ingestion for '{document_name}' from URL: {url}")
@@ -50,7 +119,16 @@ async def ingest_document(
     document_type, pages, metadata = await _parse_document(url, document_name)
     logger.info(f"Parsed {len(pages)} sections from {document_type.upper()}")
 
-    # 2) Chunk into semantic sections
+    # 2) Generate document title using LLM
+    # Combine first few pages for title generation
+    title_text = ""
+    for i, (page_num, text) in enumerate(pages[:3]):  # Use first 3 pages
+        title_text += f"\nPage {page_num}: {text[:500]}"  # First 500 chars per page
+    
+    document_title = await generate_document_title(title_text, document_name)
+    logger.info(f"Generated document title: '{document_title}'")
+
+    # 3) Chunk into semantic sections
     chunks = chunk_text_by_page(
         pages,
         document_name=document_name,
@@ -58,15 +136,25 @@ async def ingest_document(
     )
     logger.info(f"Created {len(chunks)} chunks")
 
-    # 3) Persist to PostgreSQL
+    # 4) Add contextual headers to chunks
+    for chunk in chunks:
+        # Create text_for_embedding with document title header
+        header = f"Document Title: {document_title}\n\n"
+        chunk["text_for_embedding"] = header + chunk["chunk_text"]
+        # Keep original chunk_text for metadata
+        chunk["metadata"]["document_title"] = document_title
+    
+    logger.info(f"Added contextual headers to {len(chunks)} chunks")
+
+    # 5) Persist to PostgreSQL
     db = SessionLocal()
     try:
-        # 3a) Document record
+        # 5a) Document record
         doc = Document(name=document_name, url=url)
         db.add(doc)
         db.flush()  # assigns doc.id
 
-        # 3b) Chunk records
+        # 5b) Chunk records
         for c in chunks:
             db.add(Chunk(
                 id=c["id"],
@@ -89,7 +177,7 @@ async def ingest_document(
     finally:
         db.close()
 
-    # 4) Generate embeddings (batched + retry)
+    # 6) Generate embeddings (batched + retry) - using text_for_embedding
     try:
         logger.info(f"Checking client type: {type(client)}")
         is_azure = 'AzureOpenAI' in str(type(client))
@@ -108,7 +196,7 @@ async def ingest_document(
         return chunks
     logger.info("Generated embeddings for all chunks")
 
-    # 5) Upsert to FAISS (batched + retry)
+    # 7) Upsert to FAISS (batched + retry)
     upsert_to_faiss(embedded_chunks)
     logger.info("Upserted embeddings to FAISS")
 
